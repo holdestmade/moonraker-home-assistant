@@ -46,6 +46,11 @@ class MoonrakerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         self._errors = {}
 
         if user_input is not None:
+            await self.async_set_unique_id(
+                f"{user_input[CONF_URL]}:{user_input.get(CONF_PORT) or '7125'}"
+            )
+            self._abort_if_unique_id_configured()
+
             if not await self._test_host(user_input[CONF_URL]):
                 self._errors[CONF_URL] = "host_error"
                 return await self._show_config_form(user_input)
@@ -143,6 +148,11 @@ class MoonrakerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
                 return True
         except Exception:
             return False
+        finally:
+            try:
+                await api.stop()
+            except Exception:
+                pass
 
     @staticmethod
     @callback

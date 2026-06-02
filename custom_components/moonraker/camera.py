@@ -13,6 +13,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    CONF_TLS,
     CONF_URL,
     CONF_OPTION_CAMERA_STREAM,
     CONF_OPTION_CAMERA_SNAPSHOT,
@@ -78,13 +79,14 @@ class MoonrakerCamera(MjpegCamera):
     def __init__(self, config_entry, coordinator, camera, camera_id) -> None:
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, config_entry.entry_id)})
         self.port = config_entry.options.get(CONF_OPTION_CAMERA_PORT) or DEFAULT_PORT
+        scheme = "https" if config_entry.data.get(CONF_TLS) else "http"
 
-        if camera["stream_url"].startswith("http"):
+        if camera["stream_url"].startswith(("http://", "https://")):
             base_url = ""
         else:
-            base_url = f"http://{config_entry.data.get(CONF_URL)}:{self.port}"
+            base_url = f"{scheme}://{config_entry.data.get(CONF_URL)}:{self.port}"
 
-        _LOGGER.info(f"Connecting to camera: {base_url}{camera['stream_url']}")
+        _LOGGER.info("Connecting to camera: %s%s", base_url, camera["stream_url"])
 
         super().__init__(
             device_info=self._attr_device_info,
@@ -104,6 +106,7 @@ class PreviewCamera(Camera):
         super().__init__()
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, config_entry.entry_id)})
         self.url = config_entry.data.get(CONF_URL)
+        self.scheme = "https" if config_entry.data.get(CONF_TLS) else "http"
         self.coordinator = coordinator
         self._attr_name = f"{coordinator.api_device_name} Thumbnail"
         self._attr_unique_id = f"{config_entry.entry_id}_thumbnail"
@@ -112,11 +115,12 @@ class PreviewCamera(Camera):
         self._current_path = ""
         self.port = config_entry.options.get(CONF_OPTION_THUMBNAIL_PORT) or DEFAULT_PORT
 
-    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
         """Return current camera image."""
         del width, height
 
-        # Guards for early boot
         status = self.coordinator.data.get("status")
         if not status:
             return None
@@ -129,7 +133,9 @@ class PreviewCamera(Camera):
             return self._current_pic
 
         try:
-            async with self._session.get(f"http://{self.url}:{self.port}/{new_path}") as resp:
+            async with self._session.get(
+                f"{self.scheme}://{self.url}:{self.port}/{new_path}"
+            ) as resp:
                 if resp.status == 200:
                     self._current_pic = await resp.read()
                     self._current_path = new_path

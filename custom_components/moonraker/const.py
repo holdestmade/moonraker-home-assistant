@@ -7,8 +7,15 @@ from homeassistant.const import Platform
 # Base component constants
 DOMAIN = "moonraker"
 DOMAIN_DATA = f"{DOMAIN}_data"
-VERSION = "1.10.0"
-MANIFACTURER = "@marcolivierarsenault"
+VERSION = "2.11.0"
+MANUFACTURER = "Moonraker"
+# Backwards-compat alias for the previous misspelling
+MANIFACTURER = MANUFACTURER
+
+# Polling cadence
+SLOW_POLL_DEFAULT_SECONDS = 30
+FAST_POLL_SECONDS = 1
+INTERVAL_HYSTERESIS_SECONDS = 5
 
 # Platforms
 PLATFORMS = [

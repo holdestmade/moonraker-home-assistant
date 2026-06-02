@@ -4,7 +4,8 @@ import asyncio
 import logging
 import os.path
 import uuid
-from datetime import timedelta, datetime  # datetime used for hysteresis timing
+from datetime import timedelta
+from typing import Any
 
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .api import MoonrakerApiClient
 from .const import (
@@ -24,20 +26,19 @@ from .const import (
     CONF_TLS,
     CONF_URL,
     DOMAIN,
+    FAST_POLL_SECONDS,
     HOSTNAME,
+    INTERVAL_HYSTERESIS_SECONDS,
     METHODS,
     OBJ,
     PLATFORMS,
+    SLOW_POLL_DEFAULT_SECONDS,
     TIMEOUT,
     PRINTSTATES,
 )
 from .sensor import SENSORS
 
-# Initial interval before adaptive logic takes over
-SCAN_INTERVAL = timedelta(seconds=1)
-
 _LOGGER = logging.getLogger(__name__)
-_LOGGER.debug("loading moonraker init")
 
 
 async def async_setup(_hass: HomeAssistant, _config: ConfigType):
@@ -56,10 +57,7 @@ def get_user_name(hass: HomeAssistant, entry: ConfigEntry):
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up this integration using UI."""
-    global SCAN_INTERVAL
-
-    if hass.data.get(DOMAIN) is None:
-        hass.data.setdefault(DOMAIN, {})
+    hass.data.setdefault(DOMAIN, {})
 
     custom_name = get_user_name(hass, entry)
 
@@ -68,12 +66,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     tls = entry.data.get(CONF_TLS)
     api_key = entry.data.get(CONF_API_KEY)
     printer_name = entry.data.get(CONF_PRINTER_NAME) if custom_name is None else custom_name
-
-    # Slow (idle) polling cadence from options; default 30s
-    if entry.options.get(CONF_OPTION_POLLING_RATE) is not None:
-        SCAN_INTERVAL = timedelta(seconds=entry.options.get(CONF_OPTION_POLLING_RATE))
-    else:
-        SCAN_INTERVAL = timedelta(seconds=30)
 
     api = MoonrakerApiClient(
         url,
@@ -124,8 +116,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             {"script": gcode},
         )
 
-    # Register the new service
-    hass.services.async_register(DOMAIN, "send_gcode", send_gcode_service)
+    if not hass.services.has_service(DOMAIN, "send_gcode"):
+        hass.services.async_register(DOMAIN, "send_gcode", send_gcode_service)
     return True
 
 
@@ -173,11 +165,25 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         self.query_obj = {OBJ: {}}
         self.load_sensor_data(SENSORS)
 
-        # Hysteresis timer (don’t change interval more often than every X seconds)
-        self._last_interval_change: datetime | None = None
+        self._last_interval_change = None
 
-        # Start with the "slow" cadence; we'll switch to fast once printing
-        super().__init__(hass, _LOGGER, name=DOMAIN, update_interval=SCAN_INTERVAL)
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=self._slow_seconds()),
+        )
+
+    def _slow_seconds(self) -> int:
+        """Return configured slow-poll cadence (seconds)."""
+        try:
+            return int(
+                self.config_entry.options.get(
+                    CONF_OPTION_POLLING_RATE, SLOW_POLL_DEFAULT_SECONDS
+                )
+            )
+        except (TypeError, ValueError):
+            return SLOW_POLL_DEFAULT_SECONDS
 
     async def _async_update_data(self):
         """Update data via library."""
@@ -190,39 +196,36 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
 
         return data
 
-    # === Adaptive interval logic with hysteresis ===
     def _apply_adaptive_interval(self, fresh_data: dict) -> None:
-        """
-        Adjust update_interval:
-          - Fast when actively printing (default 1s)
-          - Slow otherwise (from options polling_rate or 30s)
-        Hysteresis: don’t change more often than every 5 seconds.
-        """
-        try:
-            slow_seconds = int(self.config_entry.options.get(CONF_OPTION_POLLING_RATE, 30))
-        except Exception:
-            slow_seconds = 30
-        fast_seconds = 1  # tweak if you prefer 2s, etc.
-
-        current_state = fresh_data.get("status", {}).get("print_stats", {}).get("state")
-        target_seconds = fast_seconds if current_state == PRINTSTATES.PRINTING.value else slow_seconds
+        """Fast while printing, slow otherwise, with hysteresis."""
+        slow_seconds = self._slow_seconds()
+        current_state = (
+            fresh_data.get("status", {}).get("print_stats", {}).get("state")
+        )
+        target_seconds = (
+            FAST_POLL_SECONDS
+            if current_state == PRINTSTATES.PRINTING.value
+            else slow_seconds
+        )
         target_td = timedelta(seconds=target_seconds)
 
-        # If interval is already what we want, nothing to do
-        if getattr(self, "update_interval", None) == target_td:
+        if self.update_interval == target_td:
             return
 
-        # Hysteresis: only allow changing the interval if ≥ 5s since the last change
-        now = datetime.utcnow()
-        if self._last_interval_change is not None:
-            if (now - self._last_interval_change).total_seconds() < 5:
-                return
+        now = dt_util.utcnow()
+        if (
+            self._last_interval_change is not None
+            and (now - self._last_interval_change).total_seconds()
+            < INTERVAL_HYSTERESIS_SECONDS
+        ):
+            return
 
-        _LOGGER.debug("Adjusting polling interval to %ss (state=%s)", target_seconds, current_state)
+        _LOGGER.debug(
+            "Adjusting polling interval to %ss (state=%s)", target_seconds, current_state
+        )
         self.update_interval = target_td
         self._last_interval_change = now
         self._schedule_refresh()
-    # === end adaptive interval logic ===
 
     async def _async_get_gcode_file_detail(self, gcode_filename):
         return_gcode = {
@@ -250,20 +253,17 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         return_gcode["first_layer_height"] = gcode.get("first_layer_height", 0)
 
         try:
-            # Keep last since this can fail but, we still want the other data
-            path = gcode["thumbnails"][len(gcode["thumbnails"]) - 1]["relative_path"]
-            thumbnailSize = 0
-            for t in gcode["thumbnails"]:
-                if t["size"] > thumbnailSize:
-                    thumbnailSize = t["size"]
-                    path = t["relative_path"]
-            return_gcode["thumbnails_path"] = os.path.join(dirname, path)
-            return return_gcode
+            thumbnails = gcode.get("thumbnails") or []
+            if thumbnails:
+                biggest = max(thumbnails, key=lambda t: t.get("size", 0))
+                return_gcode["thumbnails_path"] = os.path.join(
+                    dirname, biggest["relative_path"]
+                )
         except Exception as ex:
-            _LOGGER.warning("failed to get thumbnails  {%s}", ex)
-            _LOGGER.warning("Query Object {%s}", query_object)
-            _LOGGER.warning("gcode {%s}", gcode)
-            return return_gcode
+            _LOGGER.warning("failed to get thumbnails: %s", ex)
+            _LOGGER.debug("Query Object: %s", query_object)
+            _LOGGER.debug("gcode: %s", gcode)
+        return return_gcode
 
     async def _async_fetch_data(self, query_path: METHODS, query_object, quiet: bool = False):
         myuuid = str(uuid.uuid4())
@@ -295,11 +295,18 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         except Exception as exception:
             raise UpdateFailed() from exception
 
-    async def async_fetch_data(self, query_path: METHODS, query_obj: dict[str: any] = None, quiet: bool = False):
+    async def async_fetch_data(
+        self,
+        query_path: METHODS,
+        query_obj: dict[str, Any] | None = None,
+        quiet: bool = False,
+    ):
         """Fetch data from moonraker."""
         return await self._async_fetch_data(query_path, query_obj, quiet=quiet)
 
-    async def async_send_data(self, query_path: METHODS, query_obj: dict[str: any] = None):
+    async def async_send_data(
+        self, query_path: METHODS, query_obj: dict[str, Any] | None = None
+    ):
         """Send data to moonraker."""
         return await self._async_send_data(query_path, query_obj)
 
@@ -338,7 +345,13 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
     if unloaded:
+        try:
+            await coordinator.moonraker.stop()
+        except Exception as exc:
+            _LOGGER.debug("Error stopping Moonraker client on unload: %s", exc)
         hass.data[DOMAIN].pop(entry.entry_id)
+        if not hass.data[DOMAIN]:
+            hass.services.async_remove(DOMAIN, "send_gcode")
     return unloaded
 
 
