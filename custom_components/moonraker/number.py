@@ -42,7 +42,7 @@ async def _get_config_settings(coordinator) -> dict:
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerNumberSensorDescription(NumberEntityDescription):
     """Class describing Moonraker number entities."""
 
@@ -55,18 +55,30 @@ class MoonrakerNumberSensorDescription(NumberEntityDescription):
     status_key: Optional[str] = None
 
 
+def _is_output_pin(obj: str) -> bool:
+    """True iff *obj* is an `output_pin <name>` entry."""
+    parts = obj.split(" ", 1)
+    return len(parts) == 2 and parts[0] == "output_pin"
+
+
 async def async_setup_entry(hass, entry, async_add_devices):
     """Set up the number platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    await async_setup_output_pin(coordinator, entry, async_add_devices)
-    await async_setup_temperature_target(coordinator, entry, async_add_devices)
-    await async_setup_speed_factor(coordinator, entry, async_add_devices)
-    await async_setup_fan_speed(coordinator, entry, async_add_devices)
+    builders: list = []
+    await _collect_output_pin(coordinator, builders)
+    await _collect_temperature_target(coordinator, builders)
+    await _collect_speed_factor(coordinator, builders)
+    await _collect_fan_speed(coordinator, builders)
+
+    if not builders:
+        return
+    await coordinator.async_refresh()
+    async_add_devices(b(coordinator, entry) for b in builders)
 
 
-async def async_setup_temperature_target(coordinator, entry, async_add_entities):
-    """Set optional temp target."""
+async def _collect_temperature_target(coordinator, builders):
+    """Collect optional temp target numbers."""
     sensors: list[MoonrakerNumberSensorDescription] = []
     object_list = await _get_object_list(coordinator)
 
@@ -105,18 +117,18 @@ async def async_setup_temperature_target(coordinator, entry, async_add_entities)
 
     if sensors:
         coordinator.load_sensor_data(sensors)
-        await coordinator.async_refresh()
-        async_add_entities([MoonrakerNumber(coordinator, entry, desc) for desc in sensors])
+        for desc in sensors:
+            builders.append(lambda coord, ent, d=desc: MoonrakerNumber(coord, ent, d))
 
 
-async def async_setup_output_pin(coordinator, entry, async_add_entities):
-    """Set PWM output_pin sliders only (non-PWM are switches)."""
+async def _collect_output_pin(coordinator, builders):
+    """Collect PWM output_pin sliders only (non-PWM become switches)."""
     object_list = await _get_object_list(coordinator)
     settings = await _get_config_settings(coordinator)
 
     numbers: list[MoonrakerNumberSensorDescription] = []
     for obj in object_list.get("objects", []):
-        if "output_pin" not in obj:
+        if not _is_output_pin(obj):
             continue
 
         conf = (
@@ -142,14 +154,14 @@ async def async_setup_output_pin(coordinator, entry, async_add_entities):
 
     if numbers:
         coordinator.load_sensor_data(numbers)
-        await coordinator.async_refresh()
-        async_add_entities(
-            [MoonrakerPWMOutputPin(coordinator, entry, desc) for desc in numbers]
-        )
+        for desc in numbers:
+            builders.append(
+                lambda coord, ent, d=desc: MoonrakerPWMOutputPin(coord, ent, d)
+            )
 
 
-async def async_setup_speed_factor(coordinator, entry, async_add_entities):
-    """Set up speed factor number entity."""
+async def _collect_speed_factor(coordinator, builders):
+    """Collect speed factor number entity."""
     object_list = await _get_object_list(coordinator)
     if "gcode_move" not in object_list.get("objects", []):
         return
@@ -165,14 +177,14 @@ async def async_setup_speed_factor(coordinator, entry, async_add_entities):
         update_code="M220 S",
         max_value=200,
     )
-
     coordinator.load_sensor_data([desc])
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerNumber(coordinator, entry, desc, value_multiplier=100.0)])
+    builders.append(
+        lambda coord, ent: MoonrakerNumber(coord, ent, desc, value_multiplier=100.0)
+    )
 
 
-async def async_setup_fan_speed(coordinator, entry, async_add_entities):
-    """Set up fan speed number entity."""
+async def _collect_fan_speed(coordinator, builders):
+    """Collect fan speed number entity."""
     object_list = await _get_object_list(coordinator)
     if "fan" not in object_list.get("objects", []):
         return
@@ -188,10 +200,10 @@ async def async_setup_fan_speed(coordinator, entry, async_add_entities):
         update_code="M106 S",
         max_value=100,
     )
-
     coordinator.load_sensor_data([desc])
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerFanSpeed(coordinator, entry, desc, value_multiplier=100.0)])
+    builders.append(
+        lambda coord, ent: MoonrakerFanSpeed(coord, ent, desc, value_multiplier=100.0)
+    )
 
 
 class MoonrakerPWMOutputPin(BaseMoonrakerEntity, NumberEntity):

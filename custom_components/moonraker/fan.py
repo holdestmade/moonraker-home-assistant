@@ -38,12 +38,21 @@ async def _get_config_settings(coordinator) -> dict:
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerFanDescription(FanEntityDescription):
     """Class describing Moonraker fan entities."""
 
     sensor_name: Optional[str] = None
     subscriptions: Optional[list[tuple[str, ...]]] = None
+
+
+def _is_output_pin_named_like_fan(obj: str) -> bool:
+    """True iff *obj* is `output_pin <name>` and 'fan' is one of name's tokens."""
+    parts = obj.split(" ", 1)
+    if len(parts) != 2 or parts[0] != "output_pin":
+        return False
+    tokens = parts[1].lower().split("_")
+    return "fan" in tokens
 
 
 async def async_setup_entry(hass, entry, async_add_entities):
@@ -53,15 +62,22 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 
 async def async_setup_output_pin_fan(coordinator, entry, async_add_entities):
-    """Set up fans for PWM-enabled output_pins with 'fan' in name."""
+    """PWM-enabled output_pins whose name contains a 'fan' token."""
     object_list = await _get_object_list(coordinator)
     settings = await _get_config_settings(coordinator)
 
     fans: list[MoonrakerFanDescription] = []
     for obj in object_list.get("objects", []):
-        if "output_pin" not in obj or "fan" not in obj.lower():
+        if not _is_output_pin_named_like_fan(obj):
             continue
-        if not settings["status"]["configfile"]["settings"][obj.lower()].get("pwm", False):
+        try:
+            pwm = settings["status"]["configfile"]["settings"][obj.lower()].get(
+                "pwm", False
+            )
+        except (KeyError, TypeError):
+            _LOGGER.debug("No settings entry for %s; skipping", obj)
+            continue
+        if not pwm:
             continue
 
         fans.append(

@@ -85,8 +85,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             hass.config_entries.async_update_entry(entry, title=api_device_name)
 
     except Exception as exc:
-        _LOGGER.warning("Cannot configure moonraker instance")
-        await api.stop()
+        _LOGGER.warning("Cannot configure moonraker instance: %s", exc)
+        try:
+            await api.stop()
+        except Exception as stop_exc:
+            _LOGGER.debug("Error stopping client after failed setup: %s", stop_exc)
         raise ConfigEntryNotReady(f"Error connecting to {url}:{port}") from exc
 
     coordinator = MoonrakerDataUpdateCoordinator(
@@ -110,7 +113,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         device_id = service_call.data["device_id"][0]
         dev_reg = dr.async_get(hass)
         device = dev_reg.async_get(device_id)
-        entry_id = device.primary_config_entry
+        entry_id = getattr(device, "primary_config_entry", None)
+        if entry_id is None or entry_id not in hass.data.get(DOMAIN, {}):
+            entry_id = next(
+                (eid for eid in device.config_entries if eid in hass.data.get(DOMAIN, {})),
+                None,
+            )
+        if entry_id is None:
+            _LOGGER.warning("send_gcode: no Moonraker entry found for device %s", device_id)
+            return
         await hass.data[DOMAIN][entry_id].async_send_data(
             METHODS.PRINTER_GCODE_SCRIPT,
             {"script": gcode},
