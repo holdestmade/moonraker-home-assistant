@@ -8,6 +8,7 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
     BinarySensorEntityDescription,
 )
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN, METHODS
 from .entity import BaseMoonrakerEntity
@@ -17,7 +18,10 @@ from .entity import BaseMoonrakerEntity
 async def _get_object_list(coordinator) -> dict:
     cache_key = "_cached_object_list"
     if cache_key not in coordinator.data:
-        resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        try:
+            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        except UpdateFailed:
+            resp = {"objects": []}
         if not isinstance(resp, dict) or "objects" not in resp:
             resp = {"objects": []}
         coordinator.data[cache_key] = resp

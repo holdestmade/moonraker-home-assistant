@@ -22,6 +22,7 @@ from homeassistant.const import (
     REVOLUTIONS_PER_MINUTE,
 )
 from homeassistant.core import callback
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import OBJ, DOMAIN, METHODS, PRINTERSTATES, PRINTSTATES
 from .entity import BaseMoonrakerEntity
@@ -34,7 +35,10 @@ async def _get_object_list(coordinator) -> dict:
     """Fetch and cache PRINTER_OBJECTS_LIST safely (guarantee {'objects': [...]})"""
     cache_key = "_cached_object_list"
     if cache_key not in coordinator.data:
-        resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        try:
+            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        except UpdateFailed:
+            resp = {"objects": []}
         if not isinstance(resp, dict) or "objects" not in resp:
             resp = {"objects": []}
         coordinator.data[cache_key] = resp
@@ -47,9 +51,12 @@ async def _get_config_for_obj(coordinator, obj: str, fields: list[str] | None = 
     cache_key = f"_cached_query_{obj}_{key_fields}"
     if cache_key not in coordinator.data:
         query_obj = {OBJ: {obj: fields}}
-        resp = await coordinator.async_fetch_data(
-            METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-        )
+        try:
+            resp = await coordinator.async_fetch_data(
+                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
+            )
+        except UpdateFailed:
+            resp = {}
         coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
     return coordinator.data[cache_key]
 # ---------------------------------------------
@@ -657,7 +664,11 @@ async def _history_updater(coordinator):
 
 
 async def _collect_history_sensors(coordinator, descs):
-    history = await coordinator.async_fetch_data(METHODS.SERVER_HISTORY_TOTALS)
+    try:
+        history = await coordinator.async_fetch_data(METHODS.SERVER_HISTORY_TOTALS)
+    except UpdateFailed as exc:
+        _LOGGER.debug("Skipping history sensor discovery: %s", exc)
+        return
     if history.get("error"):
         return
 
@@ -715,7 +726,11 @@ async def _queue_updater(coordinator):
 
 async def _collect_queue_sensors(coordinator, descs):
     """Job queue sensors."""
-    queue = await coordinator.async_fetch_data(METHODS.SERVER_JOB_QUEUE_STATUS)
+    try:
+        queue = await coordinator.async_fetch_data(METHODS.SERVER_JOB_QUEUE_STATUS)
+    except UpdateFailed as exc:
+        _LOGGER.debug("Skipping queue sensor discovery: %s", exc)
+        return
     if queue.get("queue_state") is None or queue.get("queued_jobs") is None:
         return
 

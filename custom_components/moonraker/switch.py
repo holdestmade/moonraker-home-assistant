@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
+from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN, METHODS, OBJ
 from .entity import BaseMoonrakerEntity
@@ -15,7 +16,10 @@ _LOGGER = logging.getLogger(__name__)
 async def _get_object_list(coordinator) -> dict:
     cache_key = "_cached_object_list"
     if cache_key not in coordinator.data:
-        resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        try:
+            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
+        except UpdateFailed:
+            resp = {"objects": []}
         if not isinstance(resp, dict) or "objects" not in resp:
             resp = {"objects": []}
         coordinator.data[cache_key] = resp
@@ -26,9 +30,12 @@ async def _get_config_settings(coordinator) -> dict:
     cache_key = "_cached_config_settings"
     if cache_key not in coordinator.data:
         query_obj = {OBJ: {"configfile": ["settings"]}}
-        resp = await coordinator.async_fetch_data(
-            METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-        )
+        try:
+            resp = await coordinator.async_fetch_data(
+                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
+            )
+        except UpdateFailed:
+            resp = {}
         coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
     return coordinator.data[cache_key]
 # ---------------------------------------------
@@ -110,9 +117,13 @@ async def _collect_output_pin_switches(coordinator, builders):
 
 async def _collect_power_devices(coordinator, builders):
     """Collect Moonraker [power] device switches."""
-    power_devices = await coordinator.async_fetch_data(
-        METHODS.MACHINE_DEVICE_POWER_DEVICES
-    )
+    try:
+        power_devices = await coordinator.async_fetch_data(
+            METHODS.MACHINE_DEVICE_POWER_DEVICES
+        )
+    except UpdateFailed as exc:
+        _LOGGER.debug("Skipping power device discovery: %s", exc)
+        return
     if power_devices.get("error"):
         return
 

@@ -10,7 +10,6 @@ from typing import Any
 import async_timeout
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -75,30 +74,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         tls=tls,
     )
 
+    # Try to reach the printer. If it's offline we still load the entry so
+    # entities stay registered (just unavailable) until it comes back, rather
+    # than putting the integration in "Failed setup, will retry".
+    api_device_name: str | None = None
     try:
         async with async_timeout.timeout(TIMEOUT):
             await api.start()
             printer_info = await api.client.call_method("printer.info")
             _LOGGER.debug(printer_info)
-
-            api_device_name = printer_name if printer_name != "" else printer_info[HOSTNAME]
-            hass.config_entries.async_update_entry(entry, title=api_device_name)
-
+            api_device_name = (
+                printer_name if printer_name else printer_info.get(HOSTNAME)
+            )
     except Exception as exc:
-        _LOGGER.warning("Cannot configure moonraker instance: %s", exc)
-        try:
-            await api.stop()
-        except Exception as stop_exc:
-            _LOGGER.debug("Error stopping client after failed setup: %s", stop_exc)
-        raise ConfigEntryNotReady(f"Error connecting to {url}:{port}") from exc
+        _LOGGER.warning(
+            "Moonraker at %s:%s unreachable during setup (%s); "
+            "loading entry anyway, will reconnect in the background.",
+            url,
+            port,
+            exc,
+        )
+
+    if not api_device_name:
+        # Fall back to whatever we already had: a user-chosen name, the
+        # previous title from a successful setup, or finally the URL.
+        api_device_name = printer_name or entry.title or url
+
+    if entry.title != api_device_name:
+        hass.config_entries.async_update_entry(entry, title=api_device_name)
 
     coordinator = MoonrakerDataUpdateCoordinator(
         hass, client=api, config_entry=entry, api_device_name=api_device_name
     )
 
+    # Best-effort first refresh; failure here is OK — the coordinator will
+    # keep retrying and entities will simply be marked unavailable.
     await coordinator.async_refresh()
-    if not coordinator.last_update_success:
-        raise ConfigEntryNotReady
+    # Ensure platform helpers that scribble into coordinator.data don't trip
+    # on None when the very first refresh failed (printer offline at boot).
+    if coordinator.data is None:
+        coordinator.data = {}
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
     for platform in PLATFORMS:
@@ -278,27 +293,27 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
 
     async def _async_fetch_data(self, query_path: METHODS, query_object, quiet: bool = False):
         myuuid = str(uuid.uuid4())
-        _LOGGER.debug(f"fetching data, uuid: {myuuid}, from: {query_path.value}")
-        _LOGGER.debug(f"fetching, uuid: {myuuid}, object: {query_object}")
-        if not self.moonraker.client.is_connected:
-            _LOGGER.warning("connection to moonraker down, restarting")
-            await self.moonraker.start()
+        _LOGGER.debug("fetching data, uuid: %s, from: %s", myuuid, query_path.value)
+        _LOGGER.debug("fetching, uuid: %s, object: %s", myuuid, query_object)
         try:
+            if not self.moonraker.client.is_connected:
+                _LOGGER.debug("connection to moonraker down, restarting")
+                await self.moonraker.start()
             if query_object is None:
                 result = await self.moonraker.client.call_method(query_path.value)
             else:
                 result = await self.moonraker.client.call_method(query_path.value, **query_object)
             if not quiet:
-                _LOGGER.debug(f"Query Result, uuid: {myuuid}: {result}")
+                _LOGGER.debug("Query Result, uuid: %s: %s", myuuid, result)
             return result
         except Exception as exception:
             raise UpdateFailed() from exception
 
     async def _async_send_data(self, query_path: METHODS, query_obj) -> None:
-        if not self.moonraker.client.is_connected:
-            _LOGGER.warning("connection to moonraker down, restarting")
-            await self.moonraker.start()
         try:
+            if not self.moonraker.client.is_connected:
+                _LOGGER.debug("connection to moonraker down, restarting")
+                await self.moonraker.start()
             if query_obj is None:
                 await self.moonraker.client.call_method(query_path.value)
             else:
