@@ -2,7 +2,7 @@
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, MANUFACTURER
 
 
 class BaseMoonrakerEntity(CoordinatorEntity):
@@ -20,6 +20,6 @@ class BaseMoonrakerEntity(CoordinatorEntity):
         return DeviceInfo(
             identifiers={(DOMAIN, self.config_entry.entry_id)},
             name=self.api_device_name,
-            model=DOMAIN,
-            manufacturer=DOMAIN,
+            model="Moonraker",
+            manufacturer=MANUFACTURER,
         )

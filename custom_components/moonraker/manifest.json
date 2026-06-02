@@ -3,10 +3,11 @@
   "name": "Moonraker",
   "codeowners": ["@holdestmade", "@cashew22", "@marcolivierarsenault"],
   "config_flow": true,
-  "documentation": "https://moonraker-home-assistant.readthedocs.io/en/latest/",
+  "documentation": "https://github.com/holdestmade/moonraker-home-assistant",
+  "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/holdestmade/moonraker-home-assistant/issues",
-  "loggers": ["moonraker"],
+  "loggers": ["moonraker", "moonraker_api"],
   "requirements": ["moonraker-api==2.0.6"],
   "version": "2.11.0"
 }
