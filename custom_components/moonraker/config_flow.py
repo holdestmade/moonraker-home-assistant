@@ -146,13 +146,14 @@ class MoonrakerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
             async with async_timeout.timeout(TIMEOUT):
                 await api.client.call_method("printer.info")
                 return True
-        except Exception:
+        except Exception as exc:
+            _LOGGER.debug("Moonraker connection test failed: %s", exc)
             return False
         finally:
             try:
                 await api.stop()
-            except Exception:
-                pass
+            except Exception as exc:
+                _LOGGER.debug("Error stopping test client: %s", exc)
 
     @staticmethod
     @callback

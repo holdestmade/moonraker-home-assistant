@@ -40,7 +40,7 @@ async def _get_config_settings(coordinator) -> dict:
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerLightSensorDescription(LightEntityDescription):
     """Class describing Moonraker light entities."""
 
@@ -50,15 +50,29 @@ class MoonrakerLightSensorDescription(LightEntityDescription):
     subscriptions: Optional[list[tuple[str, ...]]] = None
 
 
+def _is_output_pin_named_like_led(obj: str) -> bool:
+    """True iff *obj* is `output_pin <name>` and 'led' is one of name's tokens."""
+    parts = obj.split(" ", 1)
+    if len(parts) != 2 or parts[0] != "output_pin":
+        return False
+    tokens = parts[1].lower().split("_")
+    return "led" in tokens
+
+
 async def async_setup_entry(hass, entry, async_add_devices):
     """Set up the light platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    await async_setup_led_like(coordinator, entry, async_add_devices)
-    await async_setup_output_pin_light(coordinator, entry, async_add_devices)
+    builders: list = []
+    await _collect_led_like(coordinator, builders)
+    await _collect_output_pin_light(coordinator, builders)
+    if not builders:
+        return
+    await coordinator.async_refresh()
+    async_add_devices(b(coordinator, entry) for b in builders)
 
 
-async def async_setup_led_like(coordinator, entry, async_add_entities):
-    """Create entities for led / neopixel / dotstar / PCA leds."""
+async def _collect_led_like(coordinator, builders):
+    """Collect entities for led / neopixel / dotstar / PCA leds."""
     object_list = await _get_object_list(coordinator)
     settings = await _get_config_settings(coordinator)
 
@@ -119,18 +133,18 @@ async def async_setup_led_like(coordinator, entry, async_add_entities):
 
     if lights:
         coordinator.load_sensor_data(lights)
-        await coordinator.async_refresh()
-        async_add_entities([MoonrakerLED(coordinator, entry, desc) for desc in lights])
+        for desc in lights:
+            builders.append(lambda coord, ent, d=desc: MoonrakerLED(coord, ent, d))
 
 
-async def async_setup_output_pin_light(coordinator, entry, async_add_entities):
-    """Set up lights for PWM-enabled output_pins (e.g., LED strips)."""
+async def _collect_output_pin_light(coordinator, builders):
+    """Collect lights for PWM-enabled output_pins (e.g., LED strips)."""
     object_list = await _get_object_list(coordinator)
     settings = await _get_config_settings(coordinator)
 
     lights: list[MoonrakerLightSensorDescription] = []
     for obj in object_list.get("objects", []):
-        if "output_pin" not in obj or "led" not in obj.lower():
+        if not _is_output_pin_named_like_led(obj):
             continue
         conf = (
             settings.get("status", {})
@@ -154,8 +168,10 @@ async def async_setup_output_pin_light(coordinator, entry, async_add_entities):
 
     if lights:
         coordinator.load_sensor_data(lights)
-        await coordinator.async_refresh()
-        async_add_entities([MoonrakerOutputPinLight(coordinator, entry, desc) for desc in lights])
+        for desc in lights:
+            builders.append(
+                lambda coord, ent, d=desc: MoonrakerOutputPinLight(coord, ent, d)
+            )
 
 
 class MoonrakerOutputPinLight(BaseMoonrakerEntity, LightEntity):

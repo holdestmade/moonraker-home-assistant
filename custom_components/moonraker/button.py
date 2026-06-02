@@ -110,6 +110,9 @@ BUTTONS: tuple[MoonrakerButtonDescription, ...] = (
             METHODS.SERVER_JOB_QUEUE_START
         ),
         icon="mdi:playlist-play",
+        # Some Moonraker versions require job IDs for this call; ship disabled
+        # so users opt in once they've verified it works for their setup.
+        entity_registry_enabled_default=False,
     ),
     # Homing helpers
     MoonrakerButtonDescription(

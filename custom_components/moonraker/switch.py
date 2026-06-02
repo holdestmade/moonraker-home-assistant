@@ -1,4 +1,5 @@
 """Switch platform for Moonraker integration."""
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -6,6 +7,8 @@ from homeassistant.components.switch import SwitchEntity, SwitchEntityDescriptio
 
 from .const import DOMAIN, METHODS, OBJ
 from .entity import BaseMoonrakerEntity
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # -------- small helpers (module-local) --------
@@ -31,7 +34,7 @@ async def _get_config_settings(coordinator) -> dict:
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerSwitchSensorDescription(SwitchEntityDescription):
     """Class describing Moonraker switch entities."""
 
@@ -44,8 +47,14 @@ async def async_setup_entry(hass, entry, async_add_devices):
     """Set up the switch platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    await async_setup_power_device(coordinator, entry, async_add_devices)
-    await async_setup_output_pin(coordinator, entry, async_add_devices)
+    builders: list = []
+    await _collect_power_devices(coordinator, builders)
+    await _collect_output_pin_switches(coordinator, builders)
+
+    if not builders:
+        return
+    await coordinator.async_refresh()
+    async_add_devices(b(coordinator, entry) for b in builders)
 
 
 async def _power_device_updater(coordinator):
@@ -56,14 +65,20 @@ async def _power_device_updater(coordinator):
     }
 
 
-async def async_setup_output_pin(coordinator, entry, async_add_entities):
-    """Set optional binary sensor platform."""
+def _is_output_pin(obj: str) -> bool:
+    """True iff *obj* is an `output_pin <name>` entry."""
+    parts = obj.split(" ", 1)
+    return len(parts) == 2 and parts[0] == "output_pin"
+
+
+async def _collect_output_pin_switches(coordinator, builders):
+    """Collect digital (non-PWM) output_pin switches."""
     object_list = await _get_object_list(coordinator)
     settings = await _get_config_settings(coordinator)
 
-    switches = []
+    new_descs: list[MoonrakerSwitchSensorDescription] = []
     for obj in object_list.get("objects", []):
-        if "output_pin" not in obj:
+        if not _is_output_pin(obj):
             continue
 
         conf = (
@@ -75,24 +90,26 @@ async def async_setup_output_pin(coordinator, entry, async_add_entities):
         if conf.get("pwm", False):
             continue
 
-        desc = MoonrakerSwitchSensorDescription(
-            key=obj,
-            sensor_name=obj,
-            name=obj.replace("_", " ").title(),
-            icon="mdi:switch",
-            subscriptions=[(obj, "value")],
+        new_descs.append(
+            MoonrakerSwitchSensorDescription(
+                key=obj,
+                sensor_name=obj,
+                name=obj.replace("_", " ").title(),
+                icon="mdi:switch",
+                subscriptions=[(obj, "value")],
+            )
         )
-        switches.append(desc)
 
-    coordinator.load_sensor_data(switches)
-    await coordinator.async_refresh()
-    async_add_entities(
-        [MoonrakerDigitalOutputPin(coordinator, entry, desc) for desc in switches]
-    )
+    if new_descs:
+        coordinator.load_sensor_data(new_descs)
+        for desc in new_descs:
+            builders.append(
+                lambda coord, ent, d=desc: MoonrakerDigitalOutputPin(coord, ent, d)
+            )
 
 
-async def async_setup_power_device(coordinator, entry, async_add_entities):
-    """Set optional binary sensor platform."""
+async def _collect_power_devices(coordinator, builders):
+    """Collect Moonraker [power] device switches."""
     power_devices = await coordinator.async_fetch_data(
         METHODS.MACHINE_DEVICE_POWER_DEVICES
     )
@@ -101,22 +118,24 @@ async def async_setup_power_device(coordinator, entry, async_add_entities):
 
     coordinator.add_data_updater(_power_device_updater)
 
-    sensors = []
+    new_descs: list[MoonrakerSwitchSensorDescription] = []
     for device in power_devices["devices"]:
-        desc = MoonrakerSwitchSensorDescription(
-            key=device["device"],
-            sensor_name=device["device"],
-            name=device["device"].replace("_", " ").title(),
-            icon="mdi:power",
-            subscriptions=[],
+        new_descs.append(
+            MoonrakerSwitchSensorDescription(
+                key=device["device"],
+                sensor_name=device["device"],
+                name=device["device"].replace("_", " ").title(),
+                icon="mdi:power",
+                subscriptions=[],
+            )
         )
-        sensors.append(desc)
 
-    coordinator.load_sensor_data(sensors)
-    await coordinator.async_refresh()
-    async_add_entities(
-        [MoonrakerPowerDeviceSwitchSensor(coordinator, entry, desc) for desc in sensors]
-    )
+    if new_descs:
+        coordinator.load_sensor_data(new_descs)
+        for desc in new_descs:
+            builders.append(
+                lambda coord, ent, d=desc: MoonrakerPowerDeviceSwitchSensor(coord, ent, d)
+            )
 
 
 class MoonrakerSwitchSensor(BaseMoonrakerEntity, SwitchEntity):

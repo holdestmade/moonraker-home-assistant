@@ -61,8 +61,8 @@ async def async_setup_entry(
             for camera_id, camera in enumerate(cameras.get("webcams", [])):
                 async_add_entities([MoonrakerCamera(config_entry, coordinator, camera, camera_id)])
                 camera_cnt += 1
-    except Exception:
-        _LOGGER.info("Could not add any cameras from the API list")
+    except Exception as exc:
+        _LOGGER.debug("Could not add any cameras from the API list: %s", exc)
 
     if camera_cnt == 0:
         _LOGGER.info("No Camera in the list, trying hardcoded")
@@ -140,6 +140,7 @@ class PreviewCamera(Camera):
                     self._current_pic = await resp.read()
                     self._current_path = new_path
                     return self._current_pic
-        except Exception:
-            return None
+                _LOGGER.debug("Thumbnail fetch returned HTTP %s", resp.status)
+        except Exception as exc:
+            _LOGGER.debug("Thumbnail fetch failed: %s", exc)
         return None

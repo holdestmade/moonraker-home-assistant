@@ -55,7 +55,7 @@ async def _get_config_for_obj(coordinator, obj: str, fields: list[str] | None = 
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerSensorDescription(SensorEntityDescription):
     """Class describing Moonraker sensor entities."""
 
@@ -324,10 +324,16 @@ async def async_setup_entry(hass, entry, async_add_entities):
     """Set sensor platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
 
-    await async_setup_basic_sensor(coordinator, entry, async_add_entities)
-    await async_setup_optional_sensors(coordinator, entry, async_add_entities)
-    await async_setup_history_sensors(coordinator, entry, async_add_entities)
-    await async_setup_queue_sensors(coordinator, entry, async_add_entities)
+    descs: list[MoonrakerSensorDescription] = []
+    await _collect_basic_sensors(coordinator, descs)
+    await _collect_optional_sensors(coordinator, descs)
+    await _collect_history_sensors(coordinator, descs)
+    await _collect_queue_sensors(coordinator, descs)
+
+    if not descs:
+        return
+    await coordinator.async_refresh()
+    async_add_entities(MoonrakerSensor(coordinator, entry, d) for d in descs)
 
 
 async def _machine_system_info_updater(coordinator):
@@ -338,13 +344,13 @@ async def _machine_system_info_updater(coordinator):
     }
 
 
-async def async_setup_basic_sensor(coordinator, entry, async_add_entities):
+async def _collect_basic_sensors(coordinator, descs):
     coordinator.add_data_updater(_machine_system_info_updater)
     coordinator.load_sensor_data(SENSORS)
-    async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in SENSORS])
+    descs.extend(SENSORS)
 
 
-async def async_setup_optional_sensors(coordinator, entry, async_add_entities):
+async def _collect_optional_sensors(coordinator, descs):
     """Set optional sensor platform."""
     temperature_keys = [
         "temperature_sensor",
@@ -643,15 +649,14 @@ async def async_setup_optional_sensors(coordinator, entry, async_add_entities):
 
     if sensors:
         coordinator.load_sensor_data(sensors)
-        await coordinator.async_refresh()
-        async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in sensors])
+        descs.extend(sensors)
 
 
 async def _history_updater(coordinator):
     return {"history": await coordinator.async_fetch_data(METHODS.SERVER_HISTORY_TOTALS)}
 
 
-async def async_setup_history_sensors(coordinator, entry, async_add_entities):
+async def _collect_history_sensors(coordinator, descs):
     history = await coordinator.async_fetch_data(METHODS.SERVER_HISTORY_TOTALS)
     if history.get("error"):
         return
@@ -701,15 +706,14 @@ async def async_setup_history_sensors(coordinator, entry, async_add_entities):
     ]
 
     coordinator.load_sensor_data(sensors)
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in sensors])
+    descs.extend(sensors)
 
 
 async def _queue_updater(coordinator):
     return {"queue": await coordinator.async_fetch_data(METHODS.SERVER_JOB_QUEUE_STATUS)}
 
 
-async def async_setup_queue_sensors(coordinator, entry, async_add_entities):
+async def _collect_queue_sensors(coordinator, descs):
     """Job queue sensors."""
     queue = await coordinator.async_fetch_data(METHODS.SERVER_JOB_QUEUE_STATUS)
     if queue.get("queue_state") is None or queue.get("queued_jobs") is None:
@@ -736,8 +740,7 @@ async def async_setup_queue_sensors(coordinator, entry, async_add_entities):
     ]
 
     coordinator.load_sensor_data(sensors)
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerSensor(coordinator, entry, desc) for desc in sensors])
+    descs.extend(sensors)
 
 
 class MoonrakerSensor(BaseMoonrakerEntity, SensorEntity):

@@ -25,7 +25,7 @@ async def _get_object_list(coordinator) -> dict:
 # ---------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class MoonrakerBinarySensorDescription(BinarySensorEntityDescription):
     """Class describing Moonraker binary_sensor entities."""
 
@@ -38,18 +38,23 @@ class MoonrakerBinarySensorDescription(BinarySensorEntityDescription):
 async def async_setup_entry(hass, entry, async_add_devices):
     """Set up the binary_sensor platform."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    await async_setup_optional_binary_sensors(coordinator, entry, async_add_devices)
-    await async_setup_update_binary_sensors(coordinator, entry, async_add_devices)
+    descs: list[MoonrakerBinarySensorDescription] = []
+    await _collect_optional_binary_sensors(coordinator, descs)
+    await _collect_update_binary_sensor(coordinator, descs)
+    if not descs:
+        return
+    await coordinator.async_refresh()
+    async_add_devices(MoonrakerBinarySensor(coordinator, entry, d) for d in descs)
 
 
-async def async_setup_optional_binary_sensors(coordinator, entry, async_add_entities):
-    """Set optional filament sensors."""
-    sensors = []
+async def _collect_optional_binary_sensors(coordinator, descs):
+    """Collect optional filament sensors."""
     object_list = await _get_object_list(coordinator)
+    new_descs: list[MoonrakerBinarySensorDescription] = []
     for obj in object_list.get("objects", []):
         split_obj = obj.split()
         if split_obj[0] in ["filament_switch_sensor", "filament_motion_sensor"]:
-            sensors.append(
+            new_descs.append(
                 MoonrakerBinarySensorDescription(
                     key=f"{split_obj[0]}_{split_obj[1]}",
                     sensor_name=obj,
@@ -60,14 +65,13 @@ async def async_setup_optional_binary_sensors(coordinator, entry, async_add_enti
                     device_class=BinarySensorDeviceClass.OCCUPANCY,
                 )
             )
+    if new_descs:
+        coordinator.load_sensor_data(new_descs)
+        descs.extend(new_descs)
 
-    coordinator.load_sensor_data(sensors)
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerBinarySensor(coordinator, entry, desc) for desc in sensors])
 
-
-async def async_setup_update_binary_sensors(coordinator, entry, async_add_entities):
-    """Update available."""
+async def _collect_update_binary_sensor(coordinator, descs):
+    """Collect the Update Available binary sensor."""
     desc = MoonrakerBinarySensorDescription(
         key="update_available",
         sensor_name="update_available",
@@ -79,8 +83,7 @@ async def async_setup_update_binary_sensors(coordinator, entry, async_add_entiti
         entity_registry_enabled_default=False,
     )
     coordinator.load_sensor_data([desc])
-    await coordinator.async_refresh()
-    async_add_entities([MoonrakerBinarySensor(coordinator, entry, desc)])
+    descs.append(desc)
 
 
 def update_available_fn(sensor):
