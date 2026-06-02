@@ -13,23 +13,36 @@ with HACS-compliant layout, fixes, and some quality-of-life improvements.
 - **Config flow** — set up entirely from the Home Assistant UI; no YAML.
 - **Adaptive polling** — fast (1s) while a print is running, slow (configurable,
   30s default) when idle, with hysteresis so the cadence doesn't flap.
+- **Stays loaded when the printer is offline** — if the printer or its host
+  is unreachable at HA boot (or goes away later), the integration loads
+  anyway and entities are simply marked **Unavailable** until the
+  connection comes back. No more "Failed setup, will retry" red card.
 - **Rich sensors** — printer/state, current print state, temperatures
   (extruder, bed, MCU, host, additional heaters), fans (part/controller/heater),
   print progress, ETA, layer info, filament used, history totals, and more.
 - **Cameras** — auto-discovers webcams from Moonraker's `server.webcams.list`,
   plus a thumbnail preview camera that updates from the current g-code file.
+  Honors **Use TLS** for `https://` hosts.
 - **Buttons** — Emergency Stop, Pause/Resume/Cancel, Server/Host/Firmware
-  Restart, Host Shutdown, Update Refresh, Reset Totals, Start From Queue,
-  Home X/Y/Z/All, and one button per discovered Klipper g-code macro.
+  Restart, Host Shutdown, Update Refresh, Reset Totals, Home X/Y/Z/All,
+  and one button per discovered Klipper g-code macro. Start-From-Queue is
+  shipped disabled by default (some Moonraker versions require job IDs);
+  enable it from the entity registry if your setup supports it.
 - **Switches** — `[power]` devices (Moonraker power plugins) and digital
-  `output_pin` switches.
-- **Fans** — PWM `output_pin` entries whose names contain `fan`.
+  (non-PWM) `output_pin` switches.
+- **Fans** — PWM `output_pin` entries whose name contains `fan` as an
+  underscore-delimited token (e.g. `output_pin part_fan`, `case_fan`,
+  `controller_fan_1` — but not `output_pin infant_heater`).
 - **Numbers** — temperature targets, speed factor, fan speed, PWM output_pins.
-- **Lights** — neopixel/dotstar entries exposed as Klipper LED objects.
+- **Lights** — `neopixel` / `dotstar` / `led` / `pca9533` / `pca9632`
+  objects, plus PWM `output_pin` entries whose name contains `led` as an
+  underscore-delimited token.
 - **Binary sensors** — filament switch/motion sensors and an Update Available
   sensor wired to Moonraker's update manager.
 - **`moonraker.send_gcode` service** — send any g-code to any configured
-  printer device.
+  printer device. Works on older Home Assistant cores too (falls back to
+  scanning `device.config_entries` when `primary_config_entry` isn't
+  available).
 
 ## Installation
 
@@ -86,6 +99,24 @@ data:
   gcode: G28
 ```
 
+## Offline behaviour
+
+If the printer (or its host machine) is powered off when Home Assistant
+starts — or it disappears later — the integration stays loaded and all of
+its entities show as **Unavailable** in the UI. The coordinator keeps
+retrying the websocket in the background and entities recover
+automatically once it can talk to Moonraker again.
+
+One caveat: Home Assistant platforms cannot add new entities after setup
+finishes. So if the **very first** setup happens while the printer is
+offline, only the static entities (the standard sensors and buttons)
+register. Dynamically-discovered entities — g-code macros, `output_pin`s,
+filament sensors, `[power]` devices, etc. — appear after a one-time
+reload (**⋮ → Reload** on the integration card) once the printer is
+reachable. After that first successful connect they're persisted in HA's
+entity registry, so subsequent reboots-with-printer-off keep them present
+(just unavailable).
+
 ## Troubleshooting
 
 Enable debug logging in `configuration.yaml`:
@@ -100,12 +131,23 @@ logger:
 
 Common issues:
 
-- **"Failed to connect"** — confirm the host is reachable from HA and that
-  Moonraker is listening (`curl http://<host>:7125/printer/info`).
-- **"Invalid API key"** — must be exactly 32 alphanumeric characters.
+- **Entities stuck Unavailable** — confirm the host is reachable from HA
+  and that Moonraker is listening
+  (`curl http://<host>:7125/printer/info`). Debug logs will show the
+  reconnect attempts.
+- **"Invalid API key" in the config flow** — must be exactly 32
+  alphanumeric characters.
 - **No cameras appear** — make sure your webcams are configured in
-  Mainsail/Fluidd (Moonraker's webcam list); otherwise set the camera URLs
-  in the integration's options.
+  Mainsail/Fluidd (Moonraker's webcam list); otherwise set the camera
+  URLs in the integration's options. If you're on `https://` make sure
+  **Use TLS** is ticked when you set the integration up.
+- **A dynamic entity (macro / power device / filament sensor) is
+  missing** after the printer comes back from being offline — reload
+  the integration once (**⋮ → Reload**). See *Offline behaviour* above.
+- **Duplicate-entry error when adding a printer** — the integration
+  uses `host:port` as a unique ID, so the same Moonraker can only be
+  added once. Use a different host/port (or remove the existing entry
+  first).
 
 ## Credits
 
