@@ -1,7 +1,7 @@
 {
   "domain": "moonraker",
   "name": "Moonraker",
-  "codeowners": ["@holdestmade", "@marcolivierarsenault", "@cashew22"],
+  "codeowners": ["@holdestmade", "@cashew22", "@marcolivierarsenault"],
   "config_flow": true,
   "documentation": "https://github.com/holdestmade/moonraker-home-assistant",
   "integration_type": "device",
