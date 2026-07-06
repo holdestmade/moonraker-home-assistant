@@ -24,42 +24,11 @@ from homeassistant.const import (
 from homeassistant.core import callback
 from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import OBJ, DOMAIN, METHODS, PRINTERSTATES, PRINTSTATES
+from .const import DOMAIN, METHODS, PRINTERSTATES, PRINTSTATES
 from .entity import BaseMoonrakerEntity
+from .helpers import get_object_list, get_query_cached
 
 _LOGGER = logging.getLogger(__name__)
-
-
-# -------- small helpers (module-local) --------
-async def _get_object_list(coordinator) -> dict:
-    """Fetch and cache PRINTER_OBJECTS_LIST safely (guarantee {'objects': [...]})"""
-    cache_key = "_cached_object_list"
-    if cache_key not in coordinator.data:
-        try:
-            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
-        except UpdateFailed:
-            resp = {"objects": []}
-        if not isinstance(resp, dict) or "objects" not in resp:
-            resp = {"objects": []}
-        coordinator.data[cache_key] = resp
-    return coordinator.data[cache_key]
-
-
-async def _get_config_for_obj(coordinator, obj: str, fields: list[str] | None = None) -> dict:
-    """Query a specific object once per setup call; cache by object+fields."""
-    key_fields = ",".join(fields or [])
-    cache_key = f"_cached_query_{obj}_{key_fields}"
-    if cache_key not in coordinator.data:
-        query_obj = {OBJ: {obj: fields}}
-        try:
-            resp = await coordinator.async_fetch_data(
-                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-            )
-        except UpdateFailed:
-            resp = {}
-        coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
-    return coordinator.data[cache_key]
-# ---------------------------------------------
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -127,13 +96,15 @@ SENSORS: tuple[MoonrakerSensorDescription, ...] = [
         name="Print Projected Total Duration",
         value_fn=lambda sensor: sensor.empty_result_when_not_printing(
             round(
-                sensor.coordinator.data["status"]["print_stats"]["print_duration"]
-                / calculate_pct_job(sensor.coordinator.data)
-                if calculate_pct_job(sensor.coordinator.data) > 0
-                else 0,
+                (
+                    sensor.coordinator.data["status"]["print_stats"]["print_duration"]
+                    / calculate_pct_job(sensor.coordinator.data)
+                    if calculate_pct_job(sensor.coordinator.data) > 0
+                    else 0
+                )
+                / 3600,
                 2,
             )
-            / 3600
         ),
         subscriptions=[
             ("print_stats", "total_duration"),
@@ -150,15 +121,17 @@ SENSORS: tuple[MoonrakerSensorDescription, ...] = [
         value_fn=lambda sensor: sensor.empty_result_when_not_printing(
             round(
                 (
-                    sensor.coordinator.data["status"]["print_stats"]["print_duration"]
-                    / calculate_pct_job(sensor.coordinator.data)
-                    if calculate_pct_job(sensor.coordinator.data) > 0
-                    else 0
+                    (
+                        sensor.coordinator.data["status"]["print_stats"]["print_duration"]
+                        / calculate_pct_job(sensor.coordinator.data)
+                        if calculate_pct_job(sensor.coordinator.data) > 0
+                        else 0
+                    )
+                    - sensor.coordinator.data["status"]["print_stats"]["print_duration"]
                 )
-                - sensor.coordinator.data["status"]["print_stats"]["print_duration"],
+                / 3600,
                 2,
             )
-            / 3600
         ),
         subscriptions=[
             ("print_stats", "print_duration"),
@@ -343,7 +316,7 @@ async def async_setup_entry(hass, entry, async_add_entities):
     async_add_entities(MoonrakerSensor(coordinator, entry, d) for d in descs)
 
 
-async def _machine_system_info_updater(coordinator):
+async def _machine_system_info_updater(coordinator, _data):
     return {
         "system_info": (await coordinator.async_fetch_data(METHODS.MACHINE_SYSTEM_INFO))[
             "system_info"
@@ -352,8 +325,8 @@ async def _machine_system_info_updater(coordinator):
 
 
 async def _collect_basic_sensors(coordinator, descs):
+    # SENSORS subscriptions are already loaded in the coordinator constructor.
     coordinator.add_data_updater(_machine_system_info_updater)
-    coordinator.load_sensor_data(SENSORS)
     descs.extend(SENSORS)
 
 
@@ -371,7 +344,7 @@ async def _collect_optional_sensors(coordinator, descs):
     fan_keys = ["heater_fan", "controller_fan", "fan_generic"]
 
     sensors: list[MoonrakerSensorDescription] = []
-    object_list = await _get_object_list(coordinator)
+    object_list = await get_object_list(coordinator)
 
     for obj in object_list.get("objects", []):
         split_obj = obj.split()
@@ -398,7 +371,7 @@ async def _collect_optional_sensors(coordinator, descs):
             )
 
             if split_obj[0] == "bme280":
-                result = await _get_config_for_obj(coordinator, obj, None)
+                result = await get_query_cached(coordinator, obj, None)
 
                 if "pressure" in result.get("status", {}).get(obj, {}):
                     sensors.append(
@@ -510,7 +483,7 @@ async def _collect_optional_sensors(coordinator, descs):
                 )
             )
 
-            fan_data = await _get_config_for_obj(coordinator, obj, ["rpm"])
+            fan_data = await get_query_cached(coordinator, obj, ["rpm"])
             if fan_data.get("status", {}).get(obj, {}).get("rpm"):
                 sensors.append(
                     MoonrakerSensorDescription(
@@ -530,7 +503,7 @@ async def _collect_optional_sensors(coordinator, descs):
                 )
 
         elif obj == "fan":
-            fan_data = await _get_config_for_obj(coordinator, "fan", ["rpm"])
+            fan_data = await get_query_cached(coordinator, "fan", ["rpm"])
             if fan_data.get("status", {}).get("fan", {}).get("rpm"):
                 sensors.append(
                     MoonrakerSensorDescription(
@@ -659,7 +632,7 @@ async def _collect_optional_sensors(coordinator, descs):
         descs.extend(sensors)
 
 
-async def _history_updater(coordinator):
+async def _history_updater(coordinator, _data):
     return {"history": await coordinator.async_fetch_data(METHODS.SERVER_HISTORY_TOTALS)}
 
 
@@ -720,7 +693,7 @@ async def _collect_history_sensors(coordinator, descs):
     descs.extend(sensors)
 
 
-async def _queue_updater(coordinator):
+async def _queue_updater(coordinator, _data):
     return {"queue": await coordinator.async_fetch_data(METHODS.SERVER_JOB_QUEUE_STATUS)}
 
 
@@ -763,7 +736,6 @@ class MoonrakerSensor(BaseMoonrakerEntity, SensorEntity):
 
     def __init__(self, coordinator, entry, description):
         super().__init__(coordinator, entry)
-        self.coordinator = coordinator
         self.status_key = description.status_key
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_name = description.name

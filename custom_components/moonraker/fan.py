@@ -10,41 +10,12 @@ from homeassistant.components.fan import (
     FanEntityFeature,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import DOMAIN, METHODS, OBJ
+from .const import DOMAIN, METHODS
 from .entity import BaseMoonrakerEntity
+from .helpers import get_config_settings, get_object_list, is_output_pin
 
 _LOGGER = logging.getLogger(__name__)
-
-
-# -------- small helpers (module-local) --------
-async def _get_object_list(coordinator) -> dict:
-    cache_key = "_cached_object_list"
-    if cache_key not in coordinator.data:
-        try:
-            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
-        except UpdateFailed:
-            resp = {"objects": []}
-        if not isinstance(resp, dict) or "objects" not in resp:
-            resp = {"objects": []}
-        coordinator.data[cache_key] = resp
-    return coordinator.data[cache_key]
-
-
-async def _get_config_settings(coordinator) -> dict:
-    cache_key = "_cached_config_settings"
-    if cache_key not in coordinator.data:
-        query_obj = {OBJ: {"configfile": ["settings"]}}
-        try:
-            resp = await coordinator.async_fetch_data(
-                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-            )
-        except UpdateFailed:
-            resp = {}
-        coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
-    return coordinator.data[cache_key]
-# ---------------------------------------------
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -57,10 +28,9 @@ class MoonrakerFanDescription(FanEntityDescription):
 
 def _is_output_pin_named_like_fan(obj: str) -> bool:
     """True iff *obj* is `output_pin <name>` and 'fan' is one of name's tokens."""
-    parts = obj.split(" ", 1)
-    if len(parts) != 2 or parts[0] != "output_pin":
+    if not is_output_pin(obj):
         return False
-    tokens = parts[1].lower().split("_")
+    tokens = obj.split(" ", 1)[1].lower().split("_")
     return "fan" in tokens
 
 
@@ -72,8 +42,8 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 async def async_setup_output_pin_fan(coordinator, entry, async_add_entities):
     """PWM-enabled output_pins whose name contains a 'fan' token."""
-    object_list = await _get_object_list(coordinator)
-    settings = await _get_config_settings(coordinator)
+    object_list = await get_object_list(coordinator)
+    settings = await get_config_settings(coordinator)
 
     fans: list[MoonrakerFanDescription] = []
     for obj in object_list.get("objects", []):

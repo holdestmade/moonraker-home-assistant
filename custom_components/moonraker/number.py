@@ -12,41 +12,12 @@ from homeassistant.components.number import (
 )
 from homeassistant.core import callback
 from homeassistant.const import UnitOfTemperature, PERCENTAGE
-from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import DOMAIN, METHODS, OBJ
+from .const import DOMAIN, METHODS
 from .entity import BaseMoonrakerEntity
+from .helpers import get_config_settings, get_object_list, is_output_pin
 
 _LOGGER = logging.getLogger(__name__)
-
-
-# -------- small helpers (module-local) --------
-async def _get_object_list(coordinator) -> dict:
-    cache_key = "_cached_object_list"
-    if cache_key not in coordinator.data:
-        try:
-            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
-        except UpdateFailed:
-            resp = {"objects": []}
-        if not isinstance(resp, dict) or "objects" not in resp:
-            resp = {"objects": []}
-        coordinator.data[cache_key] = resp
-    return coordinator.data[cache_key]
-
-
-async def _get_config_settings(coordinator) -> dict:
-    cache_key = "_cached_config_settings"
-    if cache_key not in coordinator.data:
-        query_obj = {OBJ: {"configfile": ["settings"]}}
-        try:
-            resp = await coordinator.async_fetch_data(
-                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-            )
-        except UpdateFailed:
-            resp = {}
-        coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
-    return coordinator.data[cache_key]
-# ---------------------------------------------
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -60,12 +31,6 @@ class MoonrakerNumberSensorDescription(NumberEntityDescription):
     max_value: Optional[int] = None
     device_class: Optional[NumberDeviceClass] = None
     status_key: Optional[str] = None
-
-
-def _is_output_pin(obj: str) -> bool:
-    """True iff *obj* is an `output_pin <name>` entry."""
-    parts = obj.split(" ", 1)
-    return len(parts) == 2 and parts[0] == "output_pin"
 
 
 async def async_setup_entry(hass, entry, async_add_devices):
@@ -87,7 +52,7 @@ async def async_setup_entry(hass, entry, async_add_devices):
 async def _collect_temperature_target(coordinator, builders):
     """Collect optional temp target numbers."""
     sensors: list[MoonrakerNumberSensorDescription] = []
-    object_list = await _get_object_list(coordinator)
+    object_list = await get_object_list(coordinator)
 
     for obj in object_list.get("objects", []):
         if obj.startswith("heater_bed"):
@@ -130,12 +95,12 @@ async def _collect_temperature_target(coordinator, builders):
 
 async def _collect_output_pin(coordinator, builders):
     """Collect PWM output_pin sliders only (non-PWM become switches)."""
-    object_list = await _get_object_list(coordinator)
-    settings = await _get_config_settings(coordinator)
+    object_list = await get_object_list(coordinator)
+    settings = await get_config_settings(coordinator)
 
     numbers: list[MoonrakerNumberSensorDescription] = []
     for obj in object_list.get("objects", []):
-        if not _is_output_pin(obj):
+        if not is_output_pin(obj):
             continue
 
         conf = (
@@ -169,7 +134,7 @@ async def _collect_output_pin(coordinator, builders):
 
 async def _collect_speed_factor(coordinator, builders):
     """Collect speed factor number entity."""
-    object_list = await _get_object_list(coordinator)
+    object_list = await get_object_list(coordinator)
     if "gcode_move" not in object_list.get("objects", []):
         return
 
@@ -192,7 +157,7 @@ async def _collect_speed_factor(coordinator, builders):
 
 async def _collect_fan_speed(coordinator, builders):
     """Collect fan speed number entity."""
-    object_list = await _get_object_list(coordinator)
+    object_list = await get_object_list(coordinator)
     if "fan" not in object_list.get("objects", []):
         return
 
@@ -220,9 +185,12 @@ class MoonrakerPWMOutputPin(BaseMoonrakerEntity, NumberEntity):
         super().__init__(coordinator, entry)
         self.pin = description.sensor_name.replace("output_pin ", "")
         self._attr_mode = NumberMode.SLIDER
-        self._attr_native_value = (
-            coordinator.data["status"][description.sensor_name]["value"] * 100
-        )
+        try:
+            self._attr_native_value = (
+                coordinator.data["status"][description.sensor_name]["value"] * 100
+            )
+        except (KeyError, TypeError):
+            self._attr_native_value = None
         self.entity_description = description
         self.sensor_name = description.sensor_name
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
@@ -246,9 +214,12 @@ class MoonrakerPWMOutputPin(BaseMoonrakerEntity, NumberEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        self._attr_native_value = (
-            self.coordinator.data["status"][self.sensor_name]["value"] * 100
-        )
+        try:
+            self._attr_native_value = (
+                self.coordinator.data["status"][self.sensor_name]["value"] * 100
+            )
+        except (KeyError, TypeError):
+            pass  # keep last known value while data is incomplete
         self.async_write_ha_state()
 
 
@@ -258,10 +229,13 @@ class MoonrakerNumber(BaseMoonrakerEntity, NumberEntity):
     def __init__(self, coordinator, entry, description, value_multiplier: float = 1.0) -> None:
         super().__init__(coordinator, entry)
         self._attr_mode = NumberMode.SLIDER
-        self._attr_native_value = (
-            coordinator.data["status"][description.sensor_name][description.status_key]
-            * value_multiplier
-        )
+        try:
+            self._attr_native_value = (
+                coordinator.data["status"][description.sensor_name][description.status_key]
+                * value_multiplier
+            )
+        except (KeyError, TypeError):
+            self._attr_native_value = None
         self.entity_description = description
         self.sensor_name = description.sensor_name
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
@@ -293,10 +267,15 @@ class MoonrakerNumber(BaseMoonrakerEntity, NumberEntity):
 
     @callback
     def _handle_coordinator_update(self) -> None:
-        self._attr_native_value = (
-            self.coordinator.data["status"][self.sensor_name][self.entity_description.status_key]
-            * self.value_multiplier
-        )
+        try:
+            self._attr_native_value = (
+                self.coordinator.data["status"][self.sensor_name][
+                    self.entity_description.status_key
+                ]
+                * self.value_multiplier
+            )
+        except (KeyError, TypeError):
+            pass  # keep last known value while data is incomplete
         self.async_write_ha_state()
 
 

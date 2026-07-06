@@ -1,4 +1,5 @@
 """Binary sensors platform for Moonraker integration."""
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Optional
@@ -12,21 +13,9 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 
 from .const import DOMAIN, METHODS
 from .entity import BaseMoonrakerEntity
+from .helpers import get_object_list
 
-
-# -------- small helpers (module-local) --------
-async def _get_object_list(coordinator) -> dict:
-    cache_key = "_cached_object_list"
-    if cache_key not in coordinator.data:
-        try:
-            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
-        except UpdateFailed:
-            resp = {"objects": []}
-        if not isinstance(resp, dict) or "objects" not in resp:
-            resp = {"objects": []}
-        coordinator.data[cache_key] = resp
-    return coordinator.data[cache_key]
-# ---------------------------------------------
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -53,7 +42,7 @@ async def async_setup_entry(hass, entry, async_add_devices):
 
 async def _collect_optional_binary_sensors(coordinator, descs):
     """Collect optional filament sensors."""
-    object_list = await _get_object_list(coordinator)
+    object_list = await get_object_list(coordinator)
     new_descs: list[MoonrakerBinarySensorDescription] = []
     for obj in object_list.get("objects", []):
         split_obj = obj.split()
@@ -74,8 +63,29 @@ async def _collect_optional_binary_sensors(coordinator, descs):
         descs.extend(new_descs)
 
 
+async def _machine_update_updater(coordinator, _data):
+    return {
+        "machine_update": await coordinator.async_fetch_data(
+            METHODS.MACHINE_UPDATE_STATUS, quiet=True
+        )
+    }
+
+
 async def _collect_update_binary_sensor(coordinator, descs):
     """Collect the Update Available binary sensor."""
+    # Probe first: if the update manager is disabled, polling it every cycle
+    # would fail the whole coordinator refresh.
+    try:
+        status = await coordinator.async_fetch_data(
+            METHODS.MACHINE_UPDATE_STATUS, quiet=True
+        )
+    except UpdateFailed as exc:
+        _LOGGER.debug("Skipping update binary sensor: %s", exc)
+        return
+    if not isinstance(status, dict) or status.get("error"):
+        return
+
+    coordinator.add_data_updater(_machine_update_updater)
     desc = MoonrakerBinarySensorDescription(
         key="update_available",
         sensor_name="update_available",
@@ -92,19 +102,18 @@ async def _collect_update_binary_sensor(coordinator, descs):
 
 def update_available_fn(sensor):
     """Return if update is available."""
-    if "machine_update" not in sensor.coordinator.data:
+    version_info = sensor.coordinator.data.get("machine_update", {}).get("version_info")
+    if not version_info:
         return False
 
-    for component in sensor.coordinator.data["machine_update"]["version_info"]:
+    for component, info in version_info.items():
         if component == "system":
-            if sensor.coordinator.data["machine_update"]["version_info"][component]["package_count"] > 0:
+            if info.get("package_count", 0) > 0:
                 return True
             continue
 
-        if (
-            sensor.coordinator.data["machine_update"]["version_info"][component]["remote_version"]
-            != sensor.coordinator.data["machine_update"]["version_info"][component]["version"]
-        ):
+        remote_version = info.get("remote_version")
+        if remote_version is not None and remote_version != info.get("version"):
             return True
 
     return False
@@ -124,5 +133,8 @@ class MoonrakerBinarySensor(BaseMoonrakerEntity, BinarySensorEntity):
         self._attr_device_class = description.device_class
 
     @property
-    def is_on(self) -> bool:
-        return bool(self.entity_description.is_on_fn(self))
+    def is_on(self) -> bool | None:
+        try:
+            return bool(self.entity_description.is_on_fn(self))
+        except (KeyError, TypeError):
+            return None

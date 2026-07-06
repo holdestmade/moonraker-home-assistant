@@ -25,6 +25,7 @@ from .const import (
     CONF_OPTION_CAMERA_PORT,
     CONF_OPTION_THUMBNAIL_PORT,
     DOMAIN,
+    SLOW_POLL_DEFAULT_SECONDS,
     TIMEOUT,
 )
 
@@ -142,8 +143,8 @@ class MoonrakerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         try:
-            await api.start()
             async with async_timeout.timeout(TIMEOUT):
+                await api.start()
                 await api.client.call_method("printer.info")
                 return True
         except Exception as exc:
@@ -161,15 +162,15 @@ class MoonrakerFlowHandler(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle options."""
+    """Handle options.
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
+    ``self.config_entry`` is supplied by the OptionsFlow base class
+    (HA 2024.11+); assigning it explicitly was removed in HA 2025.12.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -185,7 +186,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Optional(
                         CONF_OPTION_POLLING_RATE,
                         default=self.config_entry.options.get(
-                            CONF_OPTION_POLLING_RATE, 30
+                            CONF_OPTION_POLLING_RATE, SLOW_POLL_DEFAULT_SECONDS
                         ),
                     ): int,
                     vol.Optional(

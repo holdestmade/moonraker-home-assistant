@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 # Base component constants
 DOMAIN = "moonraker"
 DOMAIN_DATA = f"{DOMAIN}_data"
-VERSION = "2.11.0"
+VERSION = "2.13.0"
 MANUFACTURER = "Moonraker"
 # Backwards-compat alias for the previous misspelling
 MANIFACTURER = MANUFACTURER

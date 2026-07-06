@@ -24,7 +24,12 @@ class MoonrakerApiClient(MoonrakerListener):
     """Moonraker communication API."""
 
     def __init__(
-        self, url, session, port: int = DEFAULT_PORT, api_key: str = None, tls: bool = False
+        self,
+        url,
+        session,
+        port: int = DEFAULT_PORT,
+        api_key: str | None = None,
+        tls: bool = False,
     ):
         """Init."""
         self.running = False

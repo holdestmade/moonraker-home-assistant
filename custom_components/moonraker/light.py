@@ -5,46 +5,20 @@ from dataclasses import dataclass
 from typing import Optional
 
 from homeassistant.components.light import (
+    ATTR_BRIGHTNESS,
+    ATTR_RGB_COLOR,
+    ATTR_RGBW_COLOR,
     LightEntity,
     LightEntityDescription,
     ColorMode,
 )
 from homeassistant.core import callback
-from homeassistant.helpers.update_coordinator import UpdateFailed
 
-from .const import DOMAIN, METHODS, OBJ
+from .const import DOMAIN, METHODS
 from .entity import BaseMoonrakerEntity
+from .helpers import get_config_settings, get_object_list, is_output_pin
 
 _LOGGER = logging.getLogger(__name__)
-
-
-# -------- small helpers (module-local) --------
-async def _get_object_list(coordinator) -> dict:
-    cache_key = "_cached_object_list"
-    if cache_key not in coordinator.data:
-        try:
-            resp = await coordinator.async_fetch_data(METHODS.PRINTER_OBJECTS_LIST)
-        except UpdateFailed:
-            resp = {"objects": []}
-        if not isinstance(resp, dict) or "objects" not in resp:
-            resp = {"objects": []}
-        coordinator.data[cache_key] = resp
-    return coordinator.data[cache_key]
-
-
-async def _get_config_settings(coordinator) -> dict:
-    cache_key = "_cached_config_settings"
-    if cache_key not in coordinator.data:
-        query_obj = {OBJ: {"configfile": ["settings"]}}
-        try:
-            resp = await coordinator.async_fetch_data(
-                METHODS.PRINTER_OBJECTS_QUERY, query_obj, quiet=True
-            )
-        except UpdateFailed:
-            resp = {}
-        coordinator.data[cache_key] = resp if isinstance(resp, dict) else {}
-    return coordinator.data[cache_key]
-# ---------------------------------------------
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -59,10 +33,9 @@ class MoonrakerLightSensorDescription(LightEntityDescription):
 
 def _is_output_pin_named_like_led(obj: str) -> bool:
     """True iff *obj* is `output_pin <name>` and 'led' is one of name's tokens."""
-    parts = obj.split(" ", 1)
-    if len(parts) != 2 or parts[0] != "output_pin":
+    if not is_output_pin(obj):
         return False
-    tokens = parts[1].lower().split("_")
+    tokens = obj.split(" ", 1)[1].lower().split("_")
     return "led" in tokens
 
 
@@ -80,8 +53,8 @@ async def async_setup_entry(hass, entry, async_add_devices):
 
 async def _collect_led_like(coordinator, builders):
     """Collect entities for led / neopixel / dotstar / PCA leds."""
-    object_list = await _get_object_list(coordinator)
-    settings = await _get_config_settings(coordinator)
+    object_list = await get_object_list(coordinator)
+    settings = await get_config_settings(coordinator)
 
     lights: list[MoonrakerLightSensorDescription] = []
     for obj in object_list.get("objects", []):
@@ -127,6 +100,11 @@ async def _collect_led_like(coordinator, builders):
         elif led_type == "pca9533":
             color_mode = ColorMode.RGBW
 
+        if color_mode == ColorMode.UNKNOWN:
+            # e.g. an [led] with only two of the RGB pins configured; drive
+            # all channels together as a plain brightness light.
+            color_mode = ColorMode.BRIGHTNESS
+
         lights.append(
             MoonrakerLightSensorDescription(
                 key=obj,
@@ -146,8 +124,8 @@ async def _collect_led_like(coordinator, builders):
 
 async def _collect_output_pin_light(coordinator, builders):
     """Collect lights for PWM-enabled output_pins (e.g., LED strips)."""
-    object_list = await _get_object_list(coordinator)
-    settings = await _get_config_settings(coordinator)
+    object_list = await get_object_list(coordinator)
+    settings = await get_config_settings(coordinator)
 
     lights: list[MoonrakerLightSensorDescription] = []
     for obj in object_list.get("objects", []):
@@ -241,5 +219,109 @@ class MoonrakerOutputPinLight(BaseMoonrakerEntity, LightEntity):
 
 
 class MoonrakerLED(BaseMoonrakerEntity, LightEntity):
-    """Moonraker LED class (placeholder for full RGB/RGBW support)."""
-    pass
+    """Moonraker LED class for led / neopixel / dotstar / PCA chips.
+
+    Klipper reports these objects as ``color_data``: a list of
+    ``[red, green, blue, white]`` float tuples (0.0-1.0), one per LED in the
+    chain. The whole chain is driven together via ``SET_LED``.
+    """
+
+    def __init__(self, coordinator, entry, description) -> None:
+        super().__init__(coordinator, entry)
+        self.entity_description = description
+        self.sensor_name = description.sensor_name
+        self.led_name = description.sensor_name.split(" ", 1)[-1]
+        self._attr_unique_id = f"{entry.entry_id}_{description.key}"
+        self._attr_name = description.name
+        self._attr_has_entity_name = True
+        self._attr_icon = description.icon
+        self._attr_color_mode = description.color_mode
+        self._attr_supported_color_modes = {description.color_mode}
+
+    def _color_data(self) -> list | None:
+        """Return [r, g, b, w] floats for the first LED in the chain."""
+        try:
+            return self.coordinator.data["status"][self.sensor_name]["color_data"][0]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    @property
+    def is_on(self) -> bool:
+        color_data = self._color_data()
+        return bool(color_data) and max(color_data) > 0
+
+    @property
+    def brightness(self) -> int | None:
+        color_data = self._color_data()
+        if not color_data:
+            return None
+        return int(max(color_data) * 255)
+
+    @property
+    def rgb_color(self) -> tuple[int, int, int] | None:
+        color_data = self._color_data()
+        if not color_data:
+            return None
+        scale = max(color_data[:3]) or 1.0
+        return tuple(int(c / scale * 255) for c in color_data[:3])
+
+    @property
+    def rgbw_color(self) -> tuple[int, int, int, int] | None:
+        color_data = self._color_data()
+        if not color_data:
+            return None
+        scale = max(color_data) or 1.0
+        return tuple(int(c / scale * 255) for c in color_data[:4])
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Turn on the LED with the requested color/brightness."""
+        if ATTR_RGBW_COLOR in kwargs:
+            rgbw = [c / 255 for c in kwargs[ATTR_RGBW_COLOR]]
+        elif ATTR_RGB_COLOR in kwargs:
+            rgbw = [c / 255 for c in kwargs[ATTR_RGB_COLOR]] + [0.0]
+        elif self._attr_color_mode == ColorMode.BRIGHTNESS:
+            rgbw = [1.0, 1.0, 1.0, 1.0]
+        else:
+            # Keep the current color; fall back to white when currently off.
+            current = self._color_data()
+            if current and max(current) > 0:
+                rgbw = list(current[:4]) + [0.0] * (4 - len(current[:4]))
+            elif self._attr_color_mode == ColorMode.RGBW:
+                rgbw = [1.0, 1.0, 1.0, 1.0]
+            else:
+                rgbw = [1.0, 1.0, 1.0, 0.0]
+
+        brightness = kwargs.get(ATTR_BRIGHTNESS)
+        if brightness is None:
+            brightness = self.brightness or 255
+        peak = max(rgbw) or 1.0
+        rgbw = [min(1.0, c / peak * (brightness / 255)) for c in rgbw]
+
+        await self._async_set_color(rgbw)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Turn off the LED."""
+        await self._async_set_color([0.0, 0.0, 0.0, 0.0])
+
+    async def _async_set_color(self, rgbw: list[float]) -> None:
+        red, green, blue, white = (round(c, 4) for c in rgbw)
+        await self.coordinator.async_send_data(
+            METHODS.PRINTER_GCODE_SCRIPT,
+            {
+                "script": (
+                    f"SET_LED LED={self.led_name} RED={red} GREEN={green} "
+                    f"BLUE={blue} WHITE={white} SYNC=0 TRANSMIT=1"
+                )
+            },
+        )
+        # optimistic local update for the whole chain
+        status = self.coordinator.data.get("status", {}).get(self.sensor_name)
+        if status and status.get("color_data"):
+            status["color_data"] = [
+                [red, green, blue, white] for _ in status["color_data"]
+            ]
+        self.async_write_ha_state()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        self.async_write_ha_state()
