@@ -125,9 +125,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     async def send_gcode_service(service_call):
         """Handle the service call to send g-code."""
         gcode = service_call.data["gcode"]
-        device_id = service_call.data["device_id"][0]
+        raw_device_id = service_call.data["device_id"]
+        device_id = raw_device_id[0] if isinstance(raw_device_id, list) else raw_device_id
         dev_reg = dr.async_get(hass)
         device = dev_reg.async_get(device_id)
+        if device is None:
+            _LOGGER.warning("send_gcode: unknown device %s", device_id)
+            return
         entry_id = getattr(device, "primary_config_entry", None)
         if entry_id is None or entry_id not in hass.data.get(DOMAIN, {}):
             entry_id = next(
@@ -147,24 +151,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     return True
 
 
-async def _printer_objects_updater(coordinator):
+async def _printer_objects_updater(coordinator, _data):
     return await coordinator._async_fetch_data(
         METHODS.PRINTER_OBJECTS_QUERY, coordinator.query_obj
     )
 
 
-async def _printer_info_updater(coordinator):
+async def _printer_info_updater(coordinator, _data):
     return {"printer.info": await coordinator._async_fetch_data(METHODS.PRINTER_INFO, None)}
 
 
-async def _gcode_file_detail_updater(coordinator):
-    data = await coordinator._async_fetch_data(
-        METHODS.PRINTER_OBJECTS_QUERY, coordinator.query_obj
+async def _gcode_file_detail_updater(coordinator, data):
+    # Reuse the objects query fetched earlier in this cycle instead of
+    # querying Moonraker a second time.
+    print_stats = data.get("status", {}).get("print_stats", {})
+    return await coordinator._async_get_gcode_file_detail(
+        print_stats.get("filename", ""), print_stats.get("state")
     )
-    filename = ""
-    if "status" in data:
-        filename = data["status"]["print_stats"]["filename"]
-    return await coordinator._async_get_gcode_file_detail(filename)
 
 
 class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
@@ -193,6 +196,12 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
 
         self._last_interval_change = None
 
+        # gcode metadata cache: metadata is static per file, so only refetch
+        # when the file changes or a new print starts.
+        self._gcode_meta_filename = None
+        self._gcode_meta_state = None
+        self._gcode_meta_cache = None
+
         super().__init__(
             hass,
             _LOGGER,
@@ -215,7 +224,7 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         """Update data via library."""
         data = {}
         for updater in self.updaters:
-            data.update(await updater(self))
+            data.update(await updater(self, data))
 
         # Adaptive polling (fast while printing, slow otherwise) with hysteresis
         self._apply_adaptive_interval(data)
@@ -253,7 +262,22 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
         self._last_interval_change = now
         self._schedule_refresh()
 
-    async def _async_get_gcode_file_detail(self, gcode_filename):
+    async def _async_get_gcode_file_detail(self, gcode_filename, print_state=None):
+        # Metadata is static per file: reuse the cached result unless the
+        # filename changed or a new print just started (which covers the
+        # re-slice-and-reprint-same-name case).
+        new_print_started = (
+            print_state == PRINTSTATES.PRINTING.value
+            and self._gcode_meta_state != print_state
+        )
+        self._gcode_meta_state = print_state
+        if (
+            not new_print_started
+            and gcode_filename == self._gcode_meta_filename
+            and self._gcode_meta_cache is not None
+        ):
+            return self._gcode_meta_cache
+
         return_gcode = {
             "thumbnails_path": None,
             "estimated_time": 1,
@@ -263,32 +287,33 @@ class MoonrakerDataUpdateCoordinator(DataUpdateCoordinator):
             "object_height": None,
             "first_layer_height": None,
         }
-        if gcode_filename is None or gcode_filename == "":
-            return return_gcode
+        if gcode_filename:
+            # Get prefix of the filename to get the appropriate thumbnail
+            dirname = os.path.dirname(gcode_filename)
 
-        # Get prefix of the filename to get the appropriate thumbnail
-        dirname = os.path.dirname(gcode_filename)
+            query_object = {"filename": gcode_filename}
+            gcode = await self._async_fetch_data(METHODS.SERVER_FILES_METADATA, query_object)
+            return_gcode["estimated_time"] = gcode.get("estimated_time", 0)
+            return_gcode["object_height"] = gcode.get("object_height", 0)
+            return_gcode["filament_total"] = gcode.get("filament_total", 0)
+            return_gcode["layer_count"] = gcode.get("layer_count", 0)
+            return_gcode["layer_height"] = gcode.get("layer_height", 0)
+            return_gcode["first_layer_height"] = gcode.get("first_layer_height", 0)
 
-        query_object = {"filename": gcode_filename}
-        gcode = await self._async_fetch_data(METHODS.SERVER_FILES_METADATA, query_object)
-        return_gcode["estimated_time"] = gcode.get("estimated_time", 0)
-        return_gcode["object_height"] = gcode.get("object_height", 0)
-        return_gcode["filament_total"] = gcode.get("filament_total", 0)
-        return_gcode["layer_count"] = gcode.get("layer_count", 0)
-        return_gcode["layer_height"] = gcode.get("layer_height", 0)
-        return_gcode["first_layer_height"] = gcode.get("first_layer_height", 0)
+            try:
+                thumbnails = gcode.get("thumbnails") or []
+                if thumbnails:
+                    biggest = max(thumbnails, key=lambda t: t.get("size", 0))
+                    return_gcode["thumbnails_path"] = os.path.join(
+                        dirname, biggest["relative_path"]
+                    )
+            except Exception as ex:
+                _LOGGER.warning("failed to get thumbnails: %s", ex)
+                _LOGGER.debug("Query Object: %s", query_object)
+                _LOGGER.debug("gcode: %s", gcode)
 
-        try:
-            thumbnails = gcode.get("thumbnails") or []
-            if thumbnails:
-                biggest = max(thumbnails, key=lambda t: t.get("size", 0))
-                return_gcode["thumbnails_path"] = os.path.join(
-                    dirname, biggest["relative_path"]
-                )
-        except Exception as ex:
-            _LOGGER.warning("failed to get thumbnails: %s", ex)
-            _LOGGER.debug("Query Object: %s", query_object)
-            _LOGGER.debug("gcode: %s", gcode)
+        self._gcode_meta_filename = gcode_filename
+        self._gcode_meta_cache = return_gcode
         return return_gcode
 
     async def _async_fetch_data(self, query_path: METHODS, query_object, quiet: bool = False):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 from homeassistant.components.camera import Camera
 from homeassistant.components.mjpeg.camera import MjpegCamera
@@ -52,15 +53,24 @@ async def async_setup_entry(
     camera_cnt = 0
     try:
         if (stream := config_entry.options.get(CONF_OPTION_CAMERA_STREAM)) and stream != "":
-            hardcoded_camera["stream_url"] = stream
-            hardcoded_camera["snapshot_url"] = config_entry.options.get(CONF_OPTION_CAMERA_SNAPSHOT)
-            async_add_entities([MoonrakerCamera(config_entry, coordinator, hardcoded_camera, 100)])
+            # Copy the template so one entry's custom URLs never leak into
+            # another entry sharing this module.
+            custom_camera = dict(hardcoded_camera)
+            custom_camera["stream_url"] = stream
+            custom_camera["snapshot_url"] = (
+                config_entry.options.get(CONF_OPTION_CAMERA_SNAPSHOT) or None
+            )
+            async_add_entities([MoonrakerCamera(config_entry, coordinator, custom_camera, 100)])
             camera_cnt += 1
         else:
             cameras = await coordinator.async_fetch_data(METHODS.SERVER_WEBCAMS_LIST)
-            for camera_id, camera in enumerate(cameras.get("webcams", [])):
-                async_add_entities([MoonrakerCamera(config_entry, coordinator, camera, camera_id)])
-                camera_cnt += 1
+            entities = [
+                MoonrakerCamera(config_entry, coordinator, camera, camera_id)
+                for camera_id, camera in enumerate(cameras.get("webcams", []))
+            ]
+            if entities:
+                async_add_entities(entities)
+                camera_cnt += len(entities)
     except Exception as exc:
         _LOGGER.debug("Could not add any cameras from the API list: %s", exc)
 
@@ -88,11 +98,12 @@ class MoonrakerCamera(MjpegCamera):
 
         _LOGGER.info("Connecting to camera: %s%s", base_url, camera["stream_url"])
 
+        snapshot_url = camera.get("snapshot_url")
         super().__init__(
             device_info=self._attr_device_info,
             mjpeg_url=f"{base_url}{camera['stream_url']}",
             name=f"{coordinator.api_device_name} {camera['name']}",
-            still_image_url=f"{base_url}{camera['snapshot_url']}",
+            still_image_url=f"{base_url}{snapshot_url}" if snapshot_url else None,
             unique_id=f"{config_entry.entry_id}_{camera['name']}_{camera_id}",
         )
 
@@ -134,7 +145,7 @@ class PreviewCamera(Camera):
 
         try:
             async with self._session.get(
-                f"{self.scheme}://{self.url}:{self.port}/{new_path}"
+                f"{self.scheme}://{self.url}:{self.port}/{quote(new_path)}"
             ) as resp:
                 if resp.status == 200:
                     self._current_pic = await resp.read()
